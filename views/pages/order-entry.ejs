@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= editMode ? "Edit Order" : "Order Entry" %> - Order Goods</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
+  <style>
+    body { background-color:#f4f6f8; font-family:"Poppins",sans-serif; padding:20px; }
+    .dashboard-container { max-width:900px; margin:auto; background:#fff; border-radius:10px; padding:25px; box-shadow:0 2px 10px rgba(0,0,0,.1); }
+    .dashboard-header { display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #0078d7; padding-bottom:10px; margin-bottom:20px; }
+    .logo-section { display:flex; align-items:center; gap:10px; }
+    .logo-section img { width:40px; }
+    h3 { color:#0078d7; margin-bottom:15px; }
+    .order-form { display:flex; flex-direction:column; gap:15px; }
+    .form-group { display:flex; flex-direction:column; }
+    label { font-weight:600; margin-bottom:5px; }
+    input, select { padding:8px; border:1px solid #ccc; border-radius:6px; font-size:14px; }
+    .form-row { display:flex; gap:15px; }
+    .form-group.small { flex:1; }
+    .button-grid { display:flex; gap:10px; margin-top:15px; }
+    .action-btn { background:#0078d7; color:#fff; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:600; transition:background .3s; }
+    .action-btn:hover { background:#005fa3; }
+    table { width:100%; border-collapse:collapse; margin-top:20px; }
+    th,td { border:1px solid #ddd; padding:8px; text-align:left; }
+    th { background:#0078d7; color:#fff; }
+    tr:hover { background:#f8f9fa; }
+    .delete-btn { color:#c82333; cursor:pointer; font-size:16px; transition:.2s; }
+    .delete-btn:hover { color:#a20f0f; transform:scale(1.1); }
+  </style>
+</head>
+
+<body>
+  <!-- ✅ Hidden Safe Data Injection -->
+  <input type="hidden" id="editModeData" value="<%= editMode ? 'true' : 'false' %>">
+  <input type="hidden" id="orderJsonData" value='<%- JSON.stringify(order || null) %>'>
+
+  <div class="dashboard-container">
+    <header class="dashboard-header">
+      <div class="logo-section">
+        <img src="/images/box-icon.png" alt="Logo" />
+        <h2>Order Goods</h2>
+      </div>
+    </header>
+
+    <section class="order-entry-section">
+      <h3><%= editMode ? `Edit Order #${order?.id || ""}` : "Order Entry" %></h3>
+      <form class="order-form" id="orderForm" onsubmit="return false;">
+
+        <!-- Route -->
+        <div class="form-group">
+          <label for="route">Select Route:</label>
+          <select id="route" name="route" required>
+            <option value="">-- Select Route --</option>
+          </select>
+        </div>
+
+        <!-- Party -->
+        <div class="form-group">
+          <label for="partyname">Select Party:</label>
+          <select id="partyname" name="partyname" required>
+            <option value="">-- Select Party --</option>
+          </select>
+        </div>
+
+        <!-- Item Group -->
+        <div class="form-group">
+          <label for="itemgroup">Select Item Group:</label>
+          <select id="itemgroup" name="itemgroup" required>
+            <option value="">-- Select Item Group --</option>
+          </select>
+        </div>
+
+        <!-- Item -->
+        <div class="form-group">
+          <label for="itemselect">Select Item:</label>
+          <select id="itemselect" name="itemselect" required>
+            <option value="">-- Select Item --</option>
+          </select>
+        </div>
+
+        <!-- Item details -->
+        <div class="form-row">
+          <div class="form-group small"><label for="uom">UOM:</label><input type="text" id="uom" readonly /></div>
+          <div class="form-group small"><label for="netrate">Net Rate:</label><input type="number" id="netrate" /></div>
+          <div class="form-group small"><label for="mrp">MRP:</label><input type="number" id="mrp" /></div>
+          <div class="form-group small"><label for="gst">GST %:</label><input type="number" id="gst" /></div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group small"><label for="qty">Qty:</label><input type="number" id="qty" min="0" /></div>
+          <div class="form-group small"><label for="disc">Disc %:</label><input type="number" id="disc" placeholder="%" /></div>
+          <div class="form-group small"><label for="batch">Batch:</label><input type="text" id="batch" /></div>
+        </div>
+
+        <div class="button-grid">
+          <button type="button" class="action-btn" id="addItemBtn"><i class="fas fa-plus"></i> Add Item</button>
+          <button type="button" class="action-btn" id="saveOrderBtn"><i class="fas fa-save"></i> <%= editMode ? "Update Order" : "Save Order" %></button>
+        </div>
+      </form>
+
+      <section class="saved-items">
+        <h3>Saved Items</h3>
+        <table id="itemsTable">
+          <thead>
+            <tr>
+              <th>Item Name</th>
+              <th>Qty</th>
+              <th>Rate</th>
+              <th>Disc %</th>
+              <th>MRP</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            <tr class="no-items"><td colspan="6">No items added yet</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </section>
+  </div>
+
+  <script>
+    // ✅ Parse injected EJS data
+    const editMode = document.getElementById("editModeData").value === "true";
+    const orderDataRaw = document.getElementById("orderJsonData").value;
+    const orderData = orderDataRaw ? JSON.parse(orderDataRaw) : null;
+
+    const routeSelect = document.getElementById("route");
+    const partySelect = document.getElementById("partyname");
+    const itemGroupSelect = document.getElementById("itemgroup");
+    const itemSelect = document.getElementById("itemselect");
+    const tableBody = document.getElementById("tableBody");
+
+    // ✅ Load Routes
+async function loadRoutes() {
+  try {
+    const res = await fetch("/api/routes");
+    if (!res.ok) throw new Error("Failed to fetch routes");
+    const routes = await res.json();
+
+    routeSelect.innerHTML = "<option value=''>-- Select Route --</option>";
+
+    // If API returned an empty array, show a helpful disabled option
+    if (!Array.isArray(routes) || routes.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "-- No routes available --";
+      opt.disabled = true;
+      routeSelect.appendChild(opt);
+      return;
+    }
+
+    routes.forEach(r => {
+      // Support multiple possible column names (route_name, route, name, etc.)
+      const routeName =
+        (r && (r.route_name || r.route || r.routeName || r.name)) ||
+        // fallback: if object has a single value, use that
+        (r && Object.values(r)[0]);
+
+      // skip blank/malformed rows
+      if (!routeName || String(routeName).trim() === "") return;
+
+      const opt = document.createElement("option");
+      opt.value = String(routeName).trim();
+      opt.textContent = String(routeName).trim();
+      routeSelect.appendChild(opt);
+    });
+  } catch (err) {
+    console.error("Error loading routes:", err);
+    routeSelect.innerHTML = "<option value=''>-- Failed to load routes --</option>";
+  }
+}
+
+
+    // ✅ Load Parties when route changes
+    routeSelect.addEventListener("change", async function () {
+      await loadParties(this.value);
+    });
+
+    async function loadParties(routeName) {
+      if (!routeName) {
+        partySelect.innerHTML = "<option value=''>-- Select Party --</option>";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/parties/${encodeURIComponent(routeName)}`);
+        const parties = await res.json();
+        partySelect.innerHTML = "<option value=''>-- Select Party --</option>";
+        parties.forEach(p => {
+          const opt = document.createElement("option");
+          opt.value = p.party_name;
+          opt.textContent = p.party_name;
+          partySelect.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Error loading parties:", err);
+      }
+    }
+
+    // ✅ Load Item Groups
+    async function loadItemGroups() {
+      try {
+        const res = await fetch("/api/item-groups");
+        const groups = await res.json();
+        itemGroupSelect.innerHTML = "<option value=''>-- Select Item Group --</option>";
+        groups.forEach(g => {
+          const opt = document.createElement("option");
+          opt.value = g.item_group;
+          opt.textContent = g.item_group;
+          itemGroupSelect.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Error loading item groups:", err);
+      }
+    }
+
+    // ✅ Load Items for selected group
+    async function loadItems(group) {
+      if (!group) {
+        itemSelect.innerHTML = "<option value=''>-- Select Item --</option>";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/items?itemGroup=${encodeURIComponent(group)}`);
+        const items = await res.json();
+        itemSelect.innerHTML = "<option value=''>-- Select Item --</option>";
+        items.forEach(i => {
+          const opt = document.createElement("option");
+          opt.value = i.id;
+          opt.textContent = i.name;
+          itemSelect.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Error loading items:", err);
+      }
+    }
+
+    itemGroupSelect.addEventListener("change", async (e) => {
+      await loadItems(e.target.value);
+    });
+
+    // ✅ Auto-fill item details
+    itemSelect.addEventListener("change", async e => {
+      const id = e.target.value;
+      if (!id) return;
+      const res = await fetch(`/api/items/${id}`);
+      const item = await res.json();
+      document.getElementById("uom").value = item.uom || "";
+      document.getElementById("netrate").value = item.netrate || "";
+      document.getElementById("mrp").value = item.mrp || "";
+      document.getElementById("gst").value = item.gst_percent || "";
+    });
+
+    // ✅ Add Item to table
+    document.getElementById("addItemBtn").addEventListener("click", () => {
+      const itemName = itemSelect.options[itemSelect.selectedIndex]?.text || "";
+      const qty = document.getElementById("qty").value.trim();
+      const netrate = document.getElementById("netrate").value.trim();
+      const disc = document.getElementById("disc").value.trim();
+      const mrp = document.getElementById("mrp").value.trim();
+
+      if (!itemName || !qty || !netrate)
+        return alert("⚠️ Please fill Item, Qty, and Rate.");
+
+      document.querySelector(".no-items")?.remove();
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td contenteditable>${itemName}</td>
+        <td contenteditable>${qty}</td>
+        <td contenteditable>${netrate}</td>
+        <td contenteditable>${disc || 0}</td>
+        <td contenteditable>${mrp || 0}</td>
+        <td><span class="delete-btn">🗑️</span></td>
+      `;
+      tableBody.appendChild(tr);
+    });
+
+    // ✅ Delete item
+    tableBody.addEventListener("click", e => {
+      if (e.target.classList.contains("delete-btn"))
+        e.target.closest("tr").remove();
+    });
+
+    // ✅ Prefill Edit Mode
+    async function initEditMode() {
+      if (!editMode || !orderData) return;
+
+      await loadRoutes();
+      routeSelect.value = orderData.route;
+
+      await loadParties(orderData.route);
+      partySelect.value = orderData.party_name;
+
+      await loadItemGroups();
+      itemGroupSelect.value = orderData.item_group;
+
+      await loadItems(orderData.item_group);
+
+      tableBody.innerHTML = "";
+      orderData.items.forEach(item => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td contenteditable>${item.item_name}</td>
+          <td contenteditable>${item.qty}</td>
+          <td contenteditable>${item.netrate}</td>
+          <td contenteditable>${item.discount_percent}</td>
+          <td contenteditable>${item.mrp}</td>
+          <td><span class="delete-btn">🗑️</span></td>
+        `;
+        tableBody.appendChild(tr);
+      });
+    }
+
+    // ✅ Save / Update Order
+    document.getElementById("saveOrderBtn").addEventListener("click", async () => {
+      const route = routeSelect.value.trim();
+      const partyname = partySelect.value.trim();
+      const itemgroup = itemGroupSelect.value.trim();
+      const rows = document.querySelectorAll("#itemsTable tbody tr:not(.no-items)");
+
+      if (!route || !partyname || !itemgroup)
+        return alert("⚠️ Fill all details!");
+      if (!rows.length) return alert("⚠️ Add at least one item!");
+
+      const items = Array.from(rows).map(row => {
+        const tds = row.querySelectorAll("td");
+        return {
+          itemname: tds[0].innerText.trim(),
+          qty: parseFloat(tds[1].innerText.trim()) || 0,
+          netrate: parseFloat(tds[2].innerText.trim()) || 0,
+          discount_percent: parseFloat(tds[3].innerText.trim()) || 0,
+          mrp: parseFloat(tds[4].innerText.trim()) || 0,
+        };
+      });
+
+      const orderId = editMode && orderData ? (orderData.id || orderData.order_id) : null;
+      const orderPayload = { route, partyname, itemgroup, items };
+
+      try {
+        const url = editMode ? `/api/update-order/${orderId}` : "/api/save-order";
+        const method = editMode ? "PUT" : "POST";
+
+        const res = await fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(orderPayload),
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          alert(`✅ ${editMode ? "Order updated" : "Order saved"} successfully!`);
+          window.location.href = "/order-details?updated=true";
+        } else {
+          alert(`❌ ${data.message || "Failed to save order."}`);
+        }
+      } catch (err) {
+        console.error("Save/update order error:", err);
+        alert("⚠️ Server error while saving/updating order.");
+      }
+    });
+
+    // ✅ Init
+    (async function init() {
+      await loadRoutes();
+      await loadItemGroups();
+      await initEditMode();
+    })();
+  </script>
+</body>
+</html>

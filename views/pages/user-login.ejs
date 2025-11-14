@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User Dashboard - Order Goods</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div class="dashboard-container">
+    <header class="dashboard-header">
+      <div class="logo-section">
+        <img src="/images/box-icon.png" alt="Logo" />
+        <h2>Order Goods</h2>
+      </div>
+    </header>
+
+    <section class="user-details">
+      <h3>Welcome, <%= username %>!</h3>
+      <div class="details-card">
+        <p><strong>Company Name:</strong> <%= company_name %></p>
+        <p><strong>Username:</strong> <%= username %></p>
+      </div>
+    </section>
+
+    <section class="dashboard-actions">
+      <h3>Actions</h3>
+      <div class="button-grid">
+        <a href="/order-entry"><button class="action-btn"><i class="fas fa-cart-plus"></i> Order Entry</button></a>
+        <a href="/order-details"><button class="action-btn"><i class="fas fa-list"></i> Order Details</button></a>
+        <a href="/logout"><button class="logout-btn" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Logout</button></a>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
