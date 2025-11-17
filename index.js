@@ -1,4 +1,4 @@
-// index.js (CSV-only version)
+// index.js (CSV-only, corrected)
 import express from "express";
 import bodyParser from "body-parser";
 import session from "express-session";
@@ -22,12 +22,13 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(join(__dirname, "public")));
+
 app.use(
   session({
-    secret: "superSecretKey",
+    secret: process.env.SESSION_SECRET || "superSecretKey",
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: null },
+    // do not set cookie.maxAge here statically; change per-session on login if needed
   })
 );
 
@@ -35,28 +36,30 @@ app.use(
 app.set("view engine", "ejs");
 app.set("views", join(__dirname, "views"));
 
-// ------------------ PostgreSQL Setup ------------------
-
+// ------------------ PostgreSQL Setup -----------------
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }   // required for Railway PG
+  connectionString: process.env.DATABASE_URL,
+  // optional SSL config if needed:
+  // ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false
 });
 
-pool.connect((err, client, release) => {
-  if (err) console.error("❌ DB connection failed:", err.message);
-  else {
+pool
+  .connect()
+  .then((client) => {
+    client.release();
     console.log("✅ Database connected!");
-    release();
-  }
-});
+  })
+  .catch((err) => {
+    console.error("❌ DB connection failed:", err?.message ?? err);
+  });
 
 // ------------------ Upload Folder ------------------
 const uploadDir = join(__dirname, "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, Date.now() + "-" + file.originalname),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
 const upload = multer({ storage });
 
@@ -64,6 +67,20 @@ const upload = multer({ storage });
 function checkAuth(req, res, next) {
   if (!req.session.user) return res.redirect("/");
   next();
+}
+
+// ------------------ UTIL ------------------
+function safeNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function computeDiscountAmount(discountPercent, qty, netrate) {
+  const base = safeNumber(qty, 0) * safeNumber(netrate, 0);
+  const disc = safeNumber(discountPercent, 0) / 100;
+  const amount = base * disc;
+  // ensure two decimals, return number
+  return Number.isFinite(amount) ? +amount.toFixed(2) : 0;
 }
 
 // ------------------ ROUTES ------------------
@@ -75,7 +92,7 @@ app.get("/", (req, res) =>
 
 // Login handler
 app.post("/check", async (req, res) => {
-  const { companyname, username, password, remember } = req.body;
+  const { companyname = "", username = "", password = "", remember } = req.body;
 
   try {
     const result = await pool.query(
@@ -88,7 +105,7 @@ app.post("/check", async (req, res) => {
 
     const user = result.rows[0];
 
-    if (password.trim() !== user.password.trim())
+    if ((password || "").trim() !== (user.password || "").trim())
       return res.render("pages/index", { title: "Login", error: "Incorrect password." });
 
     req.session.user = {
@@ -97,9 +114,13 @@ app.post("/check", async (req, res) => {
       is_admin: user.is_admin,
     };
 
-    req.session.cookie.maxAge = remember === "on" 
-      ? 7 * 24 * 60 * 60 * 1000 
-      : null;
+    // Set session cookie expiry only if 'remember' is on; otherwise default session cookie
+    if (remember === "on") {
+      req.session.cookie.maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+    } else {
+      // ensure browser-session cookie (no maxAge)
+      delete req.session.cookie.maxAge;
+    }
 
     res.redirect(user.is_admin ? "/admin-login" : "/user-login");
   } catch (err) {
@@ -129,20 +150,22 @@ app.get("/user-login", checkAuth, (req, res) => {
   });
 });
 
-// Order entry
+// Order entry (show edit if edit query present)
 app.get("/order-entry", checkAuth, async (req, res) => {
-  const editId = req.query.edit || null;
+  const editId = req.query.edit ?? null;
 
   if (editId) {
+    let client;
     try {
-      const orderRes = await pool.query(
+      client = await pool.connect();
+      const orderRes = await client.query(
         "SELECT id, route, party_name, item_group, created_by FROM orders WHERE id=$1",
         [editId]
       );
 
       if (!orderRes.rows.length) return res.redirect("/order-entry");
 
-      const itemsRes = await pool.query(
+      const itemsRes = await client.query(
         `SELECT id, item_id, item_name, item_group, qty, uom, netrate, 
                 discount_percent, discount_amount, batch, gst_percent, mrp
          FROM order_items 
@@ -159,6 +182,9 @@ app.get("/order-entry", checkAuth, async (req, res) => {
       });
     } catch (err) {
       console.error("❌ Load edit error:", err);
+      return res.status(500).send("Server error");
+    } finally {
+      if (client) client.release();
     }
   }
 
@@ -166,9 +192,7 @@ app.get("/order-entry", checkAuth, async (req, res) => {
 });
 
 // Order details page
-app.get("/order-details", checkAuth, (req, res) =>
-  res.render("pages/order-details")
-);
+app.get("/order-details", checkAuth, (req, res) => res.render("pages/order-details"));
 
 // ------------------ API ROUTES ------------------
 app.get("/api/routes", async (req, res) => {
@@ -176,6 +200,7 @@ app.get("/api/routes", async (req, res) => {
     const result = await pool.query("SELECT DISTINCT route FROM party_routes ORDER BY route ASC");
     res.json(result.rows);
   } catch (err) {
+    console.error("❌ /api/routes error:", err);
     res.status(500).json({ error: "Failed to fetch routes." });
   }
 });
@@ -189,9 +214,11 @@ app.get("/api/parties/:route", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
+    console.error("❌ /api/parties error:", err);
     res.status(500).json({ error: "Failed to fetch parties." });
   }
 });
+
 // Fetch item groups
 app.get("/api/item-groups", async (req, res) => {
   try {
@@ -203,6 +230,7 @@ app.get("/api/item-groups", async (req, res) => {
     `);
     res.json(result.rows);
   } catch (err) {
+    console.error("❌ /api/item-groups error:", err);
     res.status(500).json({ error: "Failed to fetch item groups." });
   }
 });
@@ -231,6 +259,7 @@ app.get("/api/items", async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
+    console.error("❌ /api/items error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
@@ -246,18 +275,16 @@ app.get("/api/items/:id", async (req, res) => {
 
     res.json(result.rows[0]);
   } catch (err) {
+    console.error("❌ /api/items/:id error:", err);
     res.status(500).json({ error: "Failed to fetch item" });
   }
 });
 
 // ------------------ ORDERS ------------------
-function computeDiscountAmount(discountPercent, qty, netrate) {
-  const base = (Number(qty) || 0) * (Number(netrate) || 0);
-  const disc = (Number(discountPercent) || 0) / 100;
-  return +(base * disc).toFixed(2);
-}
-
-// Save new order
+/**
+ * Save new order
+ * Expected req.body: { route, partyname, itemgroup, items: [ { id, itemname, qty, netrate, discount_percent, ... } ] }
+ */
 app.post("/api/save-order", checkAuth, async (req, res) => {
   const { route, partyname, itemgroup, items } = req.body;
 
@@ -266,8 +293,9 @@ app.post("/api/save-order", checkAuth, async (req, res) => {
 
   const createdBy = req.session.user.username;
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
 
     const orderRes = await client.query(
@@ -290,9 +318,9 @@ app.post("/api/save-order", checkAuth, async (req, res) => {
         if (r.rows.length) itemId = r.rows[0].id;
       }
 
-      const qty = Number(it.qty) || 0;
-      const discountPercent = Number(it.discount_percent ?? it.disc) || 0;
-      const netrate = Number(it.netrate) || 0;
+      const qty = safeNumber(it.qty, 0);
+      const discountPercent = safeNumber(it.discount_percent ?? it.disc, 0);
+      const netrate = safeNumber(it.netrate, 0);
       const discountAmount = computeDiscountAmount(discountPercent, qty, netrate);
 
       await client.query(
@@ -311,31 +339,30 @@ app.post("/api/save-order", checkAuth, async (req, res) => {
           discountPercent,
           discountAmount,
           it.batch ?? null,
-          Number(it.gst_percent ?? it.gst) || 0,
-          Number(it.mrp) || 0,
+          safeNumber(it.gst_percent ?? it.gst, 0),
+          safeNumber(it.mrp, 0),
         ]
       );
 
+      // Update stock safely
       if (itemId) {
-        await client.query("UPDATE items SET quantity=quantity-$1 WHERE id=$2", [
+        await client.query("UPDATE items SET quantity=quantity-$1 WHERE id=$2", [qty, itemId]);
+      } else if (it.itemname) {
+        await client.query("UPDATE items SET quantity=quantity-$1 WHERE LOWER(name)=LOWER($2)", [
           qty,
-          itemId,
+          it.itemname,
         ]);
-      } else {
-        await client.query(
-          "UPDATE items SET quantity=quantity-$1 WHERE LOWER(name)=LOWER($2)",
-          [qty, it.itemname]
-        );
       }
     }
 
     await client.query("COMMIT");
     res.json({ success: true, orderId });
   } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(500).json({ success: false, message: err.message });
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("❌ /api/save-order error:", err);
+    res.status(500).json({ success: false, message: err.message || "Server error" });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -347,14 +374,12 @@ app.put("/api/update-order/:id", checkAuth, async (req, res) => {
   if (!route || !partyname || !items?.length)
     return res.status(400).json({ success: false, message: "Invalid update data." });
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
 
-    const owner = await client.query(
-      "SELECT created_by FROM orders WHERE id=$1",
-      [orderId]
-    );
+    const owner = await client.query("SELECT created_by FROM orders WHERE id=$1", [orderId]);
 
     if (!owner.rows.length) throw new Error("Order not found");
 
@@ -369,15 +394,15 @@ app.put("/api/update-order/:id", checkAuth, async (req, res) => {
 
     for (const old of oldItems.rows) {
       if (old.item_id) {
-        await client.query(
-          "UPDATE items SET quantity=quantity+$1 WHERE id=$2",
-          [old.qty, old.item_id]
-        );
+        await client.query("UPDATE items SET quantity=quantity+$1 WHERE id=$2", [
+          old.qty,
+          old.item_id,
+        ]);
       } else {
-        await client.query(
-          "UPDATE items SET quantity=quantity+$1 WHERE LOWER(name)=LOWER($2)",
-          [old.qty, old.item_name]
-        );
+        await client.query("UPDATE items SET quantity=quantity+$1 WHERE LOWER(name)=LOWER($2)", [
+          old.qty,
+          old.item_name,
+        ]);
       }
     }
 
@@ -401,24 +426,23 @@ app.put("/api/update-order/:id", checkAuth, async (req, res) => {
         if (r.rows.length) itemId = r.rows[0].id;
       }
 
-      const qty = Number(it.qty) || 0;
+      const qty = safeNumber(it.qty, 0);
 
-      let avail = 999999;
+      let avail = 0;
       if (itemId) {
         const s = await client.query("SELECT quantity FROM items WHERE id=$1", [itemId]);
         avail = s.rows[0]?.quantity ?? 0;
       } else {
-        const s = await client.query(
-          "SELECT quantity FROM items WHERE LOWER(name)=LOWER($1)",
-          [it.itemname]
-        );
+        const s = await client.query("SELECT quantity FROM items WHERE LOWER(name)=LOWER($1)", [
+          it.itemname,
+        ]);
         avail = s.rows[0]?.quantity ?? 0;
       }
 
-      if (avail < qty) throw new Error(`Not enough stock for ${it.itemname}`);
+      if (avail < qty) throw new Error(`Not enough stock for ${it.itemname || it.name || "item"}`);
 
-      const discPercent = Number(it.discount_percent ?? it.disc) || 0;
-      const netrate = Number(it.netrate) || 0;
+      const discPercent = safeNumber(it.discount_percent ?? it.disc, 0);
+      const netrate = safeNumber(it.netrate, 0);
       const discAmount = computeDiscountAmount(discPercent, qty, netrate);
 
       await client.query(
@@ -429,7 +453,7 @@ app.put("/api/update-order/:id", checkAuth, async (req, res) => {
         [
           orderId,
           itemId,
-          it.itemname,
+          it.itemname || it.name || null,
           itemgroup,
           qty,
           it.uom ?? null,
@@ -437,45 +461,42 @@ app.put("/api/update-order/:id", checkAuth, async (req, res) => {
           discPercent,
           discAmount,
           it.batch ?? null,
-          Number(it.gst_percent ?? it.gst) || 0,
-          Number(it.mrp) || 0,
+          safeNumber(it.gst_percent ?? it.gst, 0),
+          safeNumber(it.mrp, 0),
         ]
       );
 
       if (itemId) {
-        await client.query("UPDATE items SET quantity=quantity-$1 WHERE id=$2", [
+        await client.query("UPDATE items SET quantity=quantity-$1 WHERE id=$2", [qty, itemId]);
+      } else if (it.itemname) {
+        await client.query("UPDATE items SET quantity=quantity-$1 WHERE LOWER(name)=LOWER($2)", [
           qty,
-          itemId,
+          it.itemname,
         ]);
-      } else {
-        await client.query(
-          "UPDATE items SET quantity=quantity-$1 WHERE LOWER(name)=LOWER($2)",
-          [qty, it.itemname]
-        );
       }
     }
 
     await client.query("COMMIT");
     res.json({ success: true, message: `Order #${orderId} updated.` });
   } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(400).json({ success: false, message: err.message });
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("❌ /api/update-order error:", err);
+    res.status(400).json({ success: false, message: err.message || "Failed to update order." });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
+
 // ---------------- DELETE ORDER ----------------
 app.delete("/api/orders/:id", checkAuth, async (req, res) => {
   const orderId = req.params.id;
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
 
-    const owner = await client.query(
-      "SELECT created_by FROM orders WHERE id=$1",
-      [orderId]
-    );
+    const owner = await client.query("SELECT created_by FROM orders WHERE id=$1", [orderId]);
 
     if (!owner.rows.length) throw new Error("Order not found");
 
@@ -494,10 +515,10 @@ app.delete("/api/orders/:id", checkAuth, async (req, res) => {
           old.item_id,
         ]);
       } else {
-        await client.query(
-          "UPDATE items SET quantity=quantity+$1 WHERE LOWER(name)=LOWER($2)",
-          [old.qty, old.item_name]
-        );
+        await client.query("UPDATE items SET quantity=quantity+$1 WHERE LOWER(name)=LOWER($2)", [
+          old.qty,
+          old.item_name,
+        ]);
       }
     }
 
@@ -507,10 +528,11 @@ app.delete("/api/orders/:id", checkAuth, async (req, res) => {
     await client.query("COMMIT");
     res.json({ success: true, message: `Order #${orderId} deleted.` });
   } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(400).json({ success: false, message: err.message });
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("❌ /api/orders DELETE error:", err);
+    res.status(400).json({ success: false, message: err.message || "Failed to delete order." });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -550,6 +572,7 @@ app.get("/api/orders", checkAuth, async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
+    console.error("❌ /api/orders GET error:", err);
     res.status(500).json({ message: "Failed to fetch orders." });
   }
 });
@@ -558,20 +581,15 @@ app.get("/api/orders", checkAuth, async (req, res) => {
 app.get("/api/orders/download/:id", checkAuth, async (req, res) => {
   const orderId = req.params.id;
 
-  const client = await pool.connect();
+  let client;
   try {
-    const orderHeader = await client.query(
-      "SELECT * FROM orders WHERE id=$1",
-      [orderId]
-    );
+    client = await pool.connect();
 
-    if (!orderHeader.rows.length)
-      return res.status(404).send("Order not found");
+    const orderHeader = await client.query("SELECT * FROM orders WHERE id=$1", [orderId]);
 
-    if (
-      !req.session.user.is_admin &&
-      orderHeader.rows[0].created_by !== req.session.user.username
-    )
+    if (!orderHeader.rows.length) return res.status(404).send("Order not found");
+
+    if (!req.session.user.is_admin && orderHeader.rows[0].created_by !== req.session.user.username)
       return res.status(403).send("Access denied");
 
     const rows = await client.query(
@@ -594,19 +612,18 @@ app.get("/api/orders/download/:id", checkAuth, async (req, res) => {
 
     res.header("Content-Type", "text/csv");
     res.attachment(`order_${orderId}.csv`);
-
     return res.send(csv);
   } catch (err) {
+    console.error("❌ /api/orders/download/:id error:", err);
     res.status(500).send("Error exporting the order.");
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
 // ---------------- DOWNLOAD ALL ORDERS (CSV ONLY) ----------------
 app.get("/download-orders", checkAuth, async (req, res) => {
-  if (!req.session.user.is_admin)
-    return res.status(403).send("Access denied.");
+  if (!req.session.user.is_admin) return res.status(403).send("Access denied.");
 
   try {
     const rows = await pool.query(`
@@ -626,8 +643,7 @@ app.get("/download-orders", checkAuth, async (req, res) => {
       ORDER BY o.created_at DESC;
     `);
 
-    if (!rows.rows.length)
-      return res.status(404).send("No orders found.");
+    if (!rows.rows.length) return res.status(404).send("No orders found.");
 
     const fields = Object.keys(rows.rows[0]);
     const parser = new Parser({ fields });
@@ -635,9 +651,9 @@ app.get("/download-orders", checkAuth, async (req, res) => {
 
     res.header("Content-Type", "text/csv");
     res.attachment(`all_orders_${Date.now()}.csv`);
-
     return res.send(csv);
   } catch (err) {
+    console.error("❌ /download-orders error:", err);
     res.status(500).send("Server error while downloading orders.");
   }
 });
@@ -654,8 +670,9 @@ app.post("/upload-party", checkAuth, upload.single("csvfile"), async (req, res) 
     .pipe(csvParser())
     .on("data", (row) => partyData.push(row))
     .on("end", async () => {
-      const client = await pool.connect();
+      let client;
       try {
+        client = await pool.connect();
         await client.query("BEGIN");
         await client.query("DELETE FROM party_routes");
 
@@ -664,11 +681,7 @@ app.post("/upload-party", checkAuth, upload.single("csvfile"), async (req, res) 
             "INSERT INTO party_routes (route, party_name) VALUES ($1,$2)",
             [
               p.route ?? p.Route ?? "",
-              p["party name"] ??
-                p.party_name ??
-                p.partyName ??
-                p.Party ??
-                "",
+              p["party name"] ?? p.party_name ?? p.partyName ?? p.Party ?? "",
             ]
           );
         }
@@ -679,12 +692,18 @@ app.post("/upload-party", checkAuth, upload.single("csvfile"), async (req, res) 
           `<script>alert('✔ Party routes uploaded successfully!');window.location.href="/upload";</script>`
         );
       } catch (err) {
-        await client.query("ROLLBACK");
+        if (client) await client.query("ROLLBACK").catch(() => {});
+        console.error("❌ /upload-party error:", err);
         res.status(500).send("Error saving routes");
       } finally {
-        client.release();
-        fs.unlinkSync(filePath);
+        if (client) client.release();
+        fs.unlink(filePath, (e) => e && console.error("Failed to delete upload file:", e));
       }
+    })
+    .on("error", (err) => {
+      console.error("❌ CSV parse error (party):", err);
+      fs.unlink(filePath, () => {});
+      res.status(400).send("Invalid CSV file.");
     });
 });
 
@@ -700,8 +719,9 @@ app.post("/upload-items", checkAuth, upload.single("csvfile"), async (req, res) 
     .pipe(csvParser())
     .on("data", (row) => itemsData.push(row))
     .on("end", async () => {
-      const client = await pool.connect();
+      let client;
       try {
+        client = await pool.connect();
         await client.query("BEGIN");
         await client.query("DELETE FROM items");
 
@@ -714,10 +734,10 @@ app.post("/upload-items", checkAuth, upload.single("csvfile"), async (req, res) 
               i.name ?? i.Name ?? "",
               i.item_group ?? i.itemGroup ?? "",
               i.uom ?? i.UOM ?? "",
-              Number(i.quantity ?? 0),
-              Number(i.netrate ?? 0),
-              Number(i.mrp ?? 0),
-              Number(i.gst_percent ?? 0),
+              safeNumber(i.quantity, 0),
+              safeNumber(i.netrate, 0),
+              safeNumber(i.mrp, 0),
+              safeNumber(i.gst_percent, 0),
             ]
           );
         }
@@ -728,12 +748,18 @@ app.post("/upload-items", checkAuth, upload.single("csvfile"), async (req, res) 
           `<script>alert('✔ Items uploaded successfully!');window.location.href="/upload";</script>`
         );
       } catch (err) {
-        await client.query("ROLLBACK");
+        if (client) await client.query("ROLLBACK").catch(() => {});
+        console.error("❌ /upload-items error:", err);
         res.status(500).send("Error uploading items");
       } finally {
-        client.release();
-        fs.unlinkSync(filePath);
+        if (client) client.release();
+        fs.unlink(filePath, (e) => e && console.error("Failed to delete upload file:", e));
       }
+    })
+    .on("error", (err) => {
+      console.error("❌ CSV parse error (items):", err);
+      fs.unlink(filePath, () => {});
+      res.status(400).send("Invalid CSV file.");
     });
 });
 
@@ -743,6 +769,4 @@ app.get("/logout", (req, res) => {
 });
 
 // ---------------- START SERVER ----------------
-app.listen(port, () =>
-  console.log(`🚀 Server running at http://localhost:${port}`)
-);
+app.listen(port, () => console.log(`🚀 Server running at http://localhost:${port}`));
